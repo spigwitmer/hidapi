@@ -24,12 +24,15 @@
 
 #include <IOKit/hid/IOHIDManager.h>
 #include <IOKit/hid/IOHIDKeys.h>
+#include <IOKit/IOKitLib.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <wchar.h>
 #include <locale.h>
 #include <pthread.h>
 #include <sys/time.h>
 #include <unistd.h>
+
+#define MIN(x, y) ((x) > (y) ? (y) : (x))
 
 #include "hidapi.h"
 
@@ -303,6 +306,37 @@ static int get_string_property_utf8(IOHIDDeviceRef device, CFStringRef prop, cha
 		return 0;
 }
 
+static int get_interface_number(IOHIDDeviceRef device)
+{
+	char transport[32];
+	int res;
+	memset(transport, '\0', 32);
+	res = get_string_property_utf8(
+		device, CFSTR(kIOHIDTransportKey),
+		transport, sizeof(transport));
+	if (!res) {
+		return -1;
+	}
+	if (strcmp(transport, kIOHIDTransportUSBValue)) {
+		return -1;
+	}
+
+	io_service_t service = IOHIDDeviceGetService(device);
+	io_registry_entry_t parent;
+	CFMutableStringRef property_value = CFStringCreateMutable(NULL, 512);
+	CFTypeRef ref;
+	int32_t interface_number;
+	if (IORegistryEntryGetParentEntry(service, kIOServicePlane, &parent)) {
+		return -1;
+	}
+	ref = IORegistryEntryCreateCFProperty(parent, CFSTR("bInterfaceNumber"), kCFAllocatorDefault, 0);
+	if (ref && CFGetTypeID(ref) == CFNumberGetTypeID()) {
+		CFNumberGetValue((CFNumberRef) ref, kCFNumberSInt32Type, &interface_number);
+		return interface_number;
+	}
+	return 1;
+}
+
 
 static int get_serial_number(IOHIDDeviceRef device, wchar_t *buf, size_t len)
 {
@@ -317,6 +351,20 @@ static int get_manufacturer_string(IOHIDDeviceRef device, wchar_t *buf, size_t l
 static int get_product_string(IOHIDDeviceRef device, wchar_t *buf, size_t len)
 {
 	return get_string_property(device, CFSTR(kIOHIDProductKey), buf, len);
+}
+
+static int get_registry_path(IOHIDDeviceRef device, char *buf, size_t len)
+{
+	io_service_t devt = IOHIDDeviceGetService(device);
+	io_string_t path;
+	if (!IORegistryEntryGetPath(devt, kIOServicePlane, path)) {
+		memset(buf, '\0', len);
+		int maxlen = MIN(len, strlen(path));
+		strncpy(buf, path, maxlen);
+		return maxlen;
+	} else {
+		return 0;
+	}
 }
 
 
@@ -339,6 +387,10 @@ static int make_path(IOHIDDeviceRef device, char *buf, size_t len)
 	int32_t location;
 
 	buf[0] = '\0';
+
+	if ((res = get_registry_path(device, buf, len)) > 0) {
+		return res;
+	}
 
 	res = get_string_property_utf8(
 		device, CFSTR(kIOHIDTransportKey),
@@ -486,8 +538,8 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id, 
 			/* Release Number */
 			cur_dev->release_number = get_int_property(dev, CFSTR(kIOHIDVersionNumberKey));
 
-			/* Interface Number (Unsupported on Mac)*/
-			cur_dev->interface_number = -1;
+			/* Interface Number */
+			cur_dev->interface_number = get_interface_number(dev);
 		}
 	}
 
